@@ -1,0 +1,442 @@
+-- ══════════════════════════════════════════════════
+-- AETHERHUB v5.0 - Save/Load System
+-- ══════════════════════════════════════════════════
+
+if _G.AETHERHUB then _G.AETHERHUB:Destroy() end
+
+_G.AETHERHUB = {}
+_G.AETHERHUB.Settings = {
+    Version = "5.1",
+    Smoothness = 0.85,       
+    RotationSmooth = 0.9,    
+    SpeedMultiplier = 1,
+    TeleportThreshold = 18,  
+    FixLompatan = true,
+    JarakMinimalRecord = 0.5, 
+    JedaTitikAman = 0.3,
+    UseRecordedHeight = false  -- <--- TAMBAH INI, default mati
+}
+
+-- SERVICES
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+-- LOAD WINDUI v1.6.65
+local _version = "1.6.65"
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/download/".. _version.."/main.lua"))()
+
+local Window = WindUI:CreateWindow({
+    Title = "AETHERHUB",
+    Subtitle = "Version ".. _G.AETHERHUB.Settings.Version,
+    Icon = "rbxassetid://10734950309",
+    Color = Color3.fromRGB(150, 20, 35),
+    Size = UDim2.fromOffset(450, 350),
+    Transparent = false
+})
+
+-- VARIABEL
+local DataRekaman = {}
+local TitikAman = {}
+local SedangMerekam = false
+local SedangMemutar = false
+local SedangMengulang = false
+local IndeksBingkai = 1
+local Koneksi = nil
+local ToggleRecordInstance = nil
+
+local TerakhirPosRecord = Vector3.zero
+local TerakhirPosAman = Vector3.zero
+local WaktuAkumulasi = 0
+local WaktuTerakhirAman = 0
+local TextTimerWidget = nil
+local NamaBerkasInput = "RuteObby1"
+
+if makefolder then makefolder("AETHERHUB_TRACKS") end
+
+local Character, Humanoid, RootPart
+local function MuatKarakter()
+    Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    Humanoid = Character:WaitForChild("Humanoid")
+    RootPart = Character:WaitForChild("HumanoidRootPart")
+end
+MuatKarakter()
+LocalPlayer.CharacterAdded:Connect(MuatKarakter)
+
+local function Notify(Judul, Pesan, Tipe)
+    WindUI:Notify({
+        Title = "AETHERHUB • ".. Judul,
+        Content = Pesan,
+        Type = (Tipe == "Sukses") and "Success" or "Information",
+        Timeout = 3
+    })
+end
+
+local function FormatWaktu(TotalDetik)
+    local Menit = math.floor(TotalDetik / 60)
+    local Detik = math.floor(TotalDetik % 60)
+    return string.format("%02d:%02d", Menit, Detik)
+end
+
+local function CekPijakanAmanObby()
+    if not RootPart or not Humanoid then return false end
+    local State = Humanoid:GetState()
+    if State == Enum.HumanoidStateType.Jumping or State == Enum.HumanoidStateType.Freefall or State == Enum.HumanoidStateType.Dead then
+        return false
+    end
+    local RaycastPar = RaycastParams.new()
+    RaycastPar.FilterType = Enum.RaycastFilterType.Exclude
+    RaycastPar.FilterDescendantsInstances = {Character}
+    local HasilRay = workspace:Raycast(RootPart.Position, Vector3.new(0, -3.6, 0), RaycastPar)
+    if HasilRay and HasilRay.Instance then
+        if HasilRay.Instance.CanCollide == false or HasilRay.Instance.Transparency > 0.9 then
+            return false
+        end
+        return true
+    end
+    return false
+end
+
+-- ══════════════════════════════════════════════════
+-- SAVE / LOAD / DELETE
+-- ══════════════════════════════════════════════════
+function _G.AETHERHUB.SaveTrack(NamaFile)
+    if #DataRekaman < 2 then Notify("SAVE ERROR", "Tidak ada data gerakan untuk disimpan!", "Gagal") return end
+    if not writefile then Notify("EXECUTOR ERROR", "Executor kamu tidak mendukung writefile!", "Gagal") return end
+
+    local DataSiapSimpan = { Tracks = {}, SafePoints = TitikAman, DurasiTotal = WaktuAkumulasi }
+    for _, frame in ipairs(DataRekaman) do
+        table.insert(DataSiapSimpan.Tracks, {
+            Posisi = {frame.Posisi.X, frame.Posisi.Y, frame.Posisi.Z},
+            Rotasi = {frame.Rotasi:ToEulerAnglesXYZ()},
+            Kecepatan = {frame.Kecepatan.X, frame.Kecepatan.Y, frame.Kecepatan.Z},
+            Lompat = frame.Lompat,
+            Tinggi = frame.Tinggi,
+            Waktu = frame.Waktu
+        })
+    end
+
+    local Sukses, HasilJSON = pcall(function() return HttpService:JSONEncode(DataSiapSimpan) end)
+    if Sukses then
+        writefile("AETHERHUB_TRACKS/".. NamaFile.. ".txt", HasilJSON)
+        Notify("SAVE SUCCESS", "Rute '".. NamaFile.. "' berhasil disimpan!", "Sukses")
+    else
+        Notify("SAVE ERROR", "Gagal melakukan enkripsi data!", "Gagal")
+    end
+end
+
+function _G.AETHERHUB.LoadTrack(NamaFile)
+    if not readfile or not isfile then Notify("EXECUTOR ERROR", "Executor kamu tidak mendukung berkas teks!", "Gagal") return end
+    local JalurBerkas = "AETHERHUB_TRACKS/".. NamaFile.. ".txt"
+    if not isfile(JalurBerkas) then Notify("LOAD ERROR", "Berkas '".. NamaFile.. "' tidak ditemukan!", "Gagal") return end
+
+    local KontenMentah = readfile(JalurBerkas)
+    local Sukses, DataTerbuka = pcall(function() return HttpService:JSONDecode(KontenMentah) end)
+
+    if Sukses and DataTerbuka then
+        DataRekaman = {}
+        TitikAman = DataTerbuka.SafePoints or {}
+        WaktuAkumulasi = DataTerbuka.DurasiTotal or 0
+
+        for _, frame in ipairs(DataTerbuka.Tracks) do
+            table.insert(DataRekaman, {
+                Posisi = Vector3.new(frame.Posisi[1], frame.Posisi[2], frame.Posisi[3]),
+                Rotasi = CFrame.fromEulerAnglesXYZ(frame.Rotasi[1], frame.Rotasi[2], frame.Rotasi[3]),
+                Kecepatan = Vector3.new(frame.Kecepatan[1], frame.Kecepatan[2], frame.Kecepatan[3]),
+                Lompat = frame.Lompat,
+                Tinggi = frame.Tinggi,
+                Waktu = frame.Waktu
+            })
+        end
+        Notify("LOAD SUCCESS", "Rute '".. NamaFile.. "' berhasil dimuat! (".. #DataRekaman.. " Titik)", "Sukses")
+    else
+        Notify("LOAD ERROR", "Format berkas rusak atau korup!", "Gagal")
+    end
+end
+
+function _G.AETHERHUB.DeleteTrack(NamaFile)
+    if not delfile or not isfile then Notify("EXECUTOR ERROR", "Executor tidak mendukung penghapusan!", "Gagal") return end
+    local JalurBerkas = "AETHERHUB_TRACKS/".. NamaFile.. ".txt"
+    if isfile(JalurBerkas) then
+        delfile(JalurBerkas)
+        Notify("DELETE SUCCESS", "Berkas '".. NamaFile.. "' dihapus permanen!", "Sukses")
+    else
+        Notify("DELETE ERROR", "Berkas tidak ditemukan!", "Gagal")
+    end
+end
+
+-- ROLLBACK
+function _G.AETHERHUB.EksekusiRollback()
+    if not SedangMerekam then Notify("ROLLBACK", "Harus dalam kondisi merekam!", "Gagal") return end
+    if #TitikAman == 0 then Notify("ROLLBACK", "Tidak ada posisi aman obby tersimpan!", "Gagal") return end
+
+    local IndeksAmanTerakhir = table.remove(TitikAman)
+    local DataAman = DataRekaman[IndeksAmanTerakhir]
+    if not DataAman then return end
+
+    for i = #DataRekaman, IndeksAmanTerakhir + 1, -1 do
+        table.remove(DataRekaman, i)
+    end
+
+    RootPart.CFrame = CFrame.new(DataAman.Posisi) * DataAman.Rotasi
+    RootPart.AssemblyLinearVelocity = Vector3.zero
+    WaktuAkumulasi = DataAman.Waktu
+    if TextTimerWidget then TextTimerWidget.Text = FormatWaktu(WaktuAkumulasi) end
+
+    TerakhirPosRecord = DataAman.Posisi
+    TerakhirPosAman = DataAman.Posisi
+    Notify("ROLLBACK", "Mundur ke platform aman obby! Sisa: ".. #TitikAman, "Sukses")
+end
+
+-- WIDGET
+local FloatingUI = nil
+local function HancurkanFloatingWidget()
+    if FloatingUI then FloatingUI:Destroy() FloatingUI = nil TextTimerWidget = nil end
+end
+
+local function BuatFloatingWidget()
+    HancurkanFloatingWidget()
+    FloatingUI = Instance.new("ScreenGui", CoreGui)
+    FloatingUI.Name = "AETHERHUB_FLOATING"
+    FloatingUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    local MainFrame = Instance.new("Frame", FloatingUI)
+    MainFrame.Size = UDim2.new(0, 340, 0, 55)
+    MainFrame.Position = UDim2.new(0.5, -170, 0.8, -27)
+    MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    MainFrame.BorderSizePixel = 0
+    MainFrame.Active = true
+    Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 14)
+    local UIStroke = Instance.new("UIStroke", MainFrame)
+    UIStroke.Color = Color3.fromRGB(150, 20, 35)
+    UIStroke.Thickness = 2
+
+    local Dragging, DragInput, DragStart, StartPos
+    MainFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            Dragging = true
+            DragStart = input.Position
+            StartPos = MainFrame.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then Dragging = false end end)
+        end
+    end)
+    MainFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then DragInput = input end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == DragInput and Dragging then
+            local Delta = input.Position - DragStart
+            MainFrame.Position = UDim2.new(StartPos.X.Scale, StartPos.X.Offset + Delta.X, StartPos.Y.Scale, StartPos.Y.Offset + Delta.Y)
+        end
+    end)
+
+    local LeftContainer = Instance.new("Frame", MainFrame)
+    LeftContainer.Size = UDim2.new(0, 160, 1, 0)
+    LeftContainer.BackgroundTransparency = 1
+
+    local RecDot = Instance.new("Frame", LeftContainer)
+    RecDot.Size = UDim2.new(0, 14, 0, 14)
+    RecDot.Position = UDim2.new(0, 15, 0.5, -7)
+    RecDot.BackgroundColor3 = Color3.fromRGB(230, 30, 40)
+    RecDot.BorderSizePixel = 0
+    Instance.new("UICorner", RecDot).CornerRadius = UDim.new(1, 0)
+
+    local RecText = Instance.new("TextLabel", LeftContainer)
+    RecText.Size = UDim2.new(0, 40, 1, 0)
+    RecText.Position = UDim2.new(0, 38, 0, 0)
+    RecText.BackgroundTransparency = 1
+    RecText.Text = "REC"
+    RecText.TextColor3 = Color3.fromRGB(230, 30, 40)
+    RecText.Font = Enum.Font.GothamBold
+    RecText.TextSize = 14
+    RecText.TextXAlignment = Enum.TextXAlignment.Left
+
+    TextTimerWidget = Instance.new("TextLabel", LeftContainer)
+    TextTimerWidget.Size = UDim2.new(0, 60, 1, 0)
+    TextTimerWidget.Position = UDim2.new(0, 85, 0, 0)
+    TextTimerWidget.BackgroundTransparency = 1
+    TextTimerWidget.Text = "00:00"
+    TextTimerWidget.TextColor3 = Color3.fromRGB(255, 255, 255)
+    TextTimerWidget.Font = Enum.Font.GothamMedium
+    TextTimerWidget.TextSize = 14
+    TextTimerWidget.TextXAlignment = Enum.TextXAlignment.Left
+
+    local Line = Instance.new("Frame", MainFrame)
+    Line.Size = UDim2.new(0, 1, 0, 25)
+    Line.Position = UDim2.new(0, 155, 0.5, -12)
+    Line.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    Line.BorderSizePixel = 0
+
+    local RollbackBtn = Instance.new("TextButton", MainFrame)
+    RollbackBtn.Size = UDim2.new(0, 95, 0, 35)
+    RollbackBtn.Position = UDim2.new(0, 168, 0.5, -17)
+    RollbackBtn.BackgroundColor3 = Color3.fromRGB(25, 50, 85)
+    RollbackBtn.Text = "◀◀ ROLLBACK"
+    RollbackBtn.TextColor3 = Color3.fromRGB(140, 190, 255)
+    RollbackBtn.Font = Enum.Font.GothamBold
+    RollbackBtn.TextSize = 10
+    Instance.new("UICorner", RollbackBtn).CornerRadius = UDim.new(0, 8)
+    RollbackBtn.MouseButton1Click:Connect(function() _G.AETHERHUB.EksekusiRollback() end)
+
+    local StopBtn = Instance.new("TextButton", MainFrame)
+    StopBtn.Size = UDim2.new(0, 60, 0, 35)
+    StopBtn.Position = UDim2.new(0, 268, 0.5, -17)
+    StopBtn.BackgroundColor3 = Color3.fromRGB(180, 25, 35)
+    StopBtn.Text = "■ STOP"
+    StopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    StopBtn.Font = Enum.Font.GothamBold
+    StopBtn.TextSize = 11
+    Instance.new("UICorner", StopBtn).CornerRadius = UDim.new(0, 8)
+    StopBtn.MouseButton1Click:Connect(function()
+        if ToggleRecordInstance then ToggleRecordInstance:SetValue(false) else _G.AETHERHUB.HentikanRekam() HancurkanFloatingWidget() end
+    end)
+end
+
+-- REKAM
+function _G.AETHERHUB.MulaiRekam()
+    if SedangMerekam then return end
+    SedangMerekam = true
+    DataRekaman = {}
+    TitikAman = {}
+    WaktuAkumulasi = 0
+    WaktuTerakhirAman = tick()
+    if RootPart then TerakhirPosRecord = RootPart.Position TerakhirPosAman = RootPart.Position end
+    BuatFloatingWidget()
+
+    Koneksi = RunService.Heartbeat:Connect(function(DeltaT)
+        if not RootPart or not SedangMerekam then return end
+        local PosisiSekarang = RootPart.Position
+        local JarakGerak = (PosisiSekarang - TerakhirPosRecord).Magnitude
+        if JarakGerak >= _G.AETHERHUB.Settings.JarakMinimalRecord then
+            WaktuAkumulasi = WaktuAkumulasi + DeltaT
+            if TextTimerWidget then TextTimerWidget.Text = FormatWaktu(WaktuAkumulasi) end
+            table.insert(DataRekaman, {
+                Posisi = PosisiSekarang,
+                Rotasi = RootPart.CFrame - PosisiSekarang,
+                Kecepatan = RootPart.AssemblyLinearVelocity,
+                Lompat = Humanoid.Jump,
+                Tinggi = PosisiSekarang.Y,
+                Waktu = WaktuAkumulasi
+            })
+            local IndeksSekarang = #DataRekaman
+            TerakhirPosRecord = PosisiSekarang
+            if CekPijakanAmanObby() then
+                local JarakDariAmanLama = (PosisiSekarang - TerakhirPosAman).Magnitude
+                local WaktuSekarang = tick()
+                if JarakDariAmanLama >= 4 and (WaktuSekarang - WaktuTerakhirAman) >= _G.AETHERHUB.Settings.JedaTitikAman then
+                    table.insert(TitikAman, IndeksSekarang)
+                    TerakhirPosAman = PosisiSekarang
+                    WaktuTerakhirAman = WaktuSekarang
+                end
+            end
+        end
+    end)
+    Notify("REKAM", "Perekaman obby dimulai...", "Sukses")
+end
+
+function _G.AETHERHUB.HentikanRekam()
+    if not SedangMerekam then return end
+    SedangMerekam = false
+    if Koneksi then Koneksi:Disconnect() end
+    HancurkanFloatingWidget()
+    Notify("REKAM", "Berhenti! Total: ".. #DataRekaman.. " titik", "Sukses")
+end
+
+-- PLAYBACK
+function _G.AETHERHUB.MulaiPutar(Ulang)
+    if #DataRekaman < 2 then Notify("ERROR", "Belum ada rekaman!", "Gagal") return end
+    if SedangMemutar then _G.AETHERHUB.HentikanPutar() return end
+    SedangMemutar = true
+    SedangMengulang = Ulang or false
+    IndeksBingkai = 1
+    local WaktuMulai = tick()
+    local TotalData = #DataRekaman
+    local HalusPos = RootPart.Position
+    local HalusRot = RootPart.CFrame - RootPart.Position
+    Notify(Ulang and "LOOP" or "PUTAR", "Dimulai...", "Sukses")
+
+    Koneksi = RunService.Heartbeat:Connect(function()
+        if not SedangMemutar or not RootPart then _G.AETHERHUB.HentikanPutar() return end
+        local WaktuSekarang = (tick() - WaktuMulai) * _G.AETHERHUB.Settings.SpeedMultiplier
+        while IndeksBingkai < TotalData and DataRekaman[IndeksBingkai + 1].Waktu <= WaktuSekarang do IndeksBingkai = IndeksBingkai + 1 end
+        if IndeksBingkai >= TotalData then
+            if SedangMengulang then IndeksBingkai = 1 WaktuMulai = tick() return else _G.AETHERHUB.HentikanPutar() return end
+        end
+        local Data1 = DataRekaman[IndeksBingkai]
+        local Data2 = DataRekaman[IndeksBingkai + 1]
+        local JarakWaktu = Data2.Waktu - Data1.Waktu
+        local Progresi = JarakWaktu > 0 and math.clamp((WaktuSekarang - Data1.Waktu) / JarakWaktu, 0, 1) or 0
+        local TargetXZ = Data1.Posisi:Lerp(Data2.Posisi, Progresi)
+
+-- PILIH Y: pakai rekaman atau pakai tinggi asli
+local TargetY
+if _G.AETHERHUB.Settings.UseRecordedHeight then
+    TargetY = Data1.Tinggi + (Data2.Tinggi - Data1.Tinggi) * Progresi
+else
+    TargetY = RootPart.Position.Y  -- biarin gravitasi yang kerja
+end
+
+local TargetPos = Vector3.new(TargetXZ.X, TargetY, TargetXZ.Z)
+        local TargetRot = Data1.Rotasi:Lerp(Data2.Rotasi, Progresi * _G.AETHERHUB.Settings.RotationSmooth)
+        HalusPos = HalusPos:Lerp(TargetPos, _G.AETHERHUB.Settings.Smoothness)
+        HalusRot = HalusRot:Lerp(TargetRot, _G.AETHERHUB.Settings.Smoothness)
+        local Jarak = (RootPart.Position - HalusPos).Magnitude
+        if Jarak > _G.AETHERHUB.Settings.TeleportThreshold then
+            RootPart.CFrame = CFrame.new(TargetPos) * TargetRot
+            HalusPos = TargetPos HalusRot = TargetRot
+        else
+            Humanoid:MoveTo(HalusPos)
+            RootPart.CFrame = CFrame.new(HalusPos) * HalusRot
+      
+if _G.AETHERHUB.Settings.UseRecordedHeight then
+    RootPart.AssemblyLinearVelocity = Data1.Kecepatan:Lerp(Data2.Kecepatan, Progresi)
+else
+    -- hanya ikutin kecepatan XZ, Y biarin fisika
+    local vel = Data1.Kecepatan:Lerp(Data2.Kecepatan, Progresi)
+    RootPart.AssemblyLinearVelocity = Vector3.new(vel.X, RootPart.AssemblyLinearVelocity.Y, vel.Z)
+end
+        end
+        if Data1.Lompat or Data2.Lompat then Humanoid.Jump = true end
+    end)
+
+function _G.AETHERHUB.HentikanPutar()
+    if not SedangMemutar then return end
+    SedangMemutar = false SedangMengulang = false
+    if Koneksi then Koneksi:Disconnect() end
+    Notify("BERHENTI", "Gerakan dihentikan", "Sukses")
+end
+
+function _G.AETHERHUB:Destroy()
+    if _G.AETHERHUB.HentikanPutar then _G.AETHERHUB.HentikanPutar() end
+    if _G.AETHERHUB.HentikanRekam then _G.AETHERHUB.HentikanRekam() end
+    HancurkanFloatingWidget()
+    Window:Close()
+end
+
+-- GUI
+local MainTab = Window:Tab({ Title = "Main", Icon = "rbxassetid://10723415903" })
+local SettingsTab = Window:Tab({ Title = "Settings", Icon = "rbxassetid://10734950020" })
+
+ToggleRecordInstance = MainTab:Toggle({ Title = "Record Movement", Desc = "Aktifkan untuk mulai merekam, matikan untuk berhenti", Value = false, Callback = function(state) if state then _G.AETHERHUB.MulaiRekam() else _G.AETHERHUB.HentikanRekam() end end })
+MainTab:Button({ Title = "Play Track", Desc = "Putar hasil rekaman sekali jalan", Callback = function() _G.AETHERHUB.MulaiPutar(false) end })
+MainTab:Toggle({ Title = "Loop Playback", Desc = "Putar hasil rekaman terus-menerus", Value = false, Callback = function(state) if state then _G.AETHERHUB.MulaiPutar(true) else _G.AETHERHUB.HentikanPutar() end end })
+MainTab:Button({ Title = "Stop Playback", Desc = "Paksa berhenti pemutaran", Callback = function() _G.AETHERHUB.HentikanPutar() end })
+
+SettingsTab:Input({ Title = "Save Route Name", Desc = "Ketik nama untuk berkas rute obby kamu", Value = NamaBerkasInput, Placeholder = "Ketik di sini...", Callback = function(text) NamaBerkasInput = text end })
+SettingsTab:Button({ Title = "Save Recording to File", Desc = "Simpan data rekaman aktif ke berkas teks lokal", Callback = function() _G.AETHERHUB.SaveTrack(NamaBerkasInput) end })
+SettingsTab:Button({ Title = "Load Recording from File", Desc = "Muat rute obby yang sudah tersimpan sebelumnya", Callback = function() _G.AETHERHUB.LoadTrack(NamaBerkasInput) end })
+SettingsTab:Button({ Title = "Delete Route File", Desc = "Hapus berkas rute yang dipilih secara permanen", Callback = function() _G.AETHERHUB.DeleteTrack(NamaBerkasInput) end })
+
+SettingsTab:Slider({ Title = "Smoothness", Min = 0.1, Max = 1, Step = 0.05, Value = _G.AETHERHUB.Settings.Smoothness, Callback = function(v) _G.AETHERHUB.Settings.Smoothness = v end })
+SettingsTab:Slider({ Title = "Rotation Smoothness", Min = 0.1, Max = 1, Step = 0.05, Value = _G.AETHERHUB.Settings.RotationSmooth, Callback = function(v) _G.AETHERHUB.Settings.RotationSmooth = v end })
+SettingsTab:Slider({ Title = "Speed Multiplier", Min = 0.5, Max = 3, Step = 0.1, Value = _G.AETHERHUB.Settings.SpeedMultiplier, Callback = function(v) _G.AETHERHUB.Settings.SpeedMultiplier = v end })
+SettingsTab:Toggle({ Title = "Fix Jump (Anti-Slip)", Value = _G.AETHERHUB.Settings.FixLompatan, Callback = function(s) _G.AETHERHUB.Settings.FixLompatan = s end })
+SettingsTab:Toggle({ 
+    Title="Ikuti Tinggi Rekaman", 
+    Desc="Matikan supaya avatar tinggi tidak tenggelam, dan jatuh natural kalau platform hilang", 
+    Value=_G.AETHERHUB.Settings.UseRecordedHeight, 
+    Callback=function(s) _G.AETHERHUB.Settings.UseRecordedHeight = s end 
+})
